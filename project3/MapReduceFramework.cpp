@@ -178,6 +178,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     jc->mapOutputVector = new std::vector <IntermediatePair>();
     jc->reduceOutputVector = &outputVec;
     jc->inputVector = &inputVec;
+    jc->inputSortedandShuffledVec = new std::vector<IntermediatePair>();
 
     //init thread contexts vector
     jc->threadContexts = new ThreadContext[multiThreadLevel];
@@ -301,6 +302,28 @@ void sortPhase(ThreadContext* context) {
         jc->mapCounter++;
         std::sort((jc->mapOutoutVector)[old_val].begin(), jc->mapOutputVector[old_val].end(), sortKeys);
     }
+}
+
+
+void sufflePhase(ThreadContext* context) {
+    // SHUFFLER THREAD IS THE FIRST THREAD THAT BEEN CREATED A.K.A THREAD[0] 
+    // we wamt to run over all ThreadContext and collect mapOutputVector from each tc objects 
+    // into one vector. next step will be to sort them by key. in this stage we'll hope to have a sorted vector of pairs from all ThreadContext.
+    
+    
+    // either we check that context of input is the first thread to be created or get it
+    JobContext* jc = context->job;
+    ThreadContext* shuffler = jc->threadContexts[0]; // get jc->ThreadContexts[0]
+    
+    jc->state = SHUFFLE_STAGE;
+    
+    // inputSortedandShuffledVec holds all pairs
+    for (int i = 0; i < jc->MULTI_THREAD_NUM; i++) {
+        std::copy(jc->threadContexts[i].mapOutputVector.begin(), jc->threadContexts[i].mapOutputVector.end(), back_inserter(jc->inputSortedandShuffledVec);    
+    }
+                  
+    // now lets sort mapOutputVector
+    std::sort(jc->inputSortedandShuffledVec.begin(), jc->inputSortedandShuffledVec.end(), sortKeys);
 }
 
 
