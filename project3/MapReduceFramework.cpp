@@ -11,6 +11,7 @@
 #define ALLOC_ERROR "allocation failed"
 #define THREAD_CREATE_FAIL "thread creation fail"
 #define  MUTEX_DESTROY_FAIL "mutex destroy fail"
+#define THREAD_JOIN_FAIL "thread join fail"
 /**
  * Define the context of each thread.
  */
@@ -35,8 +36,7 @@ struct jobContext{
 
     std::atomic<unsigned int> numIntermediaryElements{};
     std::atomic<unsigned int> numOutputElements{};
-    std::atomic<unsigned int> startMapCounter{};
-    std::atomic<unsigned int> finishMapCounter{};
+    std::atomic<unsigned int> mapCounter{};
     std::atomic<unsigned int> reduceCounter{};
 
     pthread_mutex_t stateMutex;
@@ -105,22 +105,26 @@ void emit3 (K3* key, V3* value, void* context)
     currThreadContext->job->reduceOutputVector.push_back(pair);
     mutexUnlock(currThreadContext->job->reduceOutputVecMutex);
 }
+/**
+ * In this phase each thread reads pairs of (k1, v1) from the input vector and calls the map function
+ * on each of them. The map function in turn will produce (k2, v2) and will call the emit2 function to
+ * update the framework databases.
+ * @param context context of a thread
+ */
 void mapPhase(ThreadContext* context)
 {
     jobContext* jc = context->job;
-    unsigned int oldVal = jc->startMapCounter;
+    unsigned int oldVal = jc->mapCounter;
     while (oldVal < (unsigned int) jc->inputVector->size())
     {
-        jc->startMapCounter++;
+        jc->mapCounter++;
         context->client->map((*jc->inputVector)[oldVal].first, (*jc->inputVector)[oldVal].second, context);
 
-        jc->finishMapCounter++;
-
         mutexLock(jc->stateMutex);
-        jc->state.percentage = ((float)(jc->finishMapCounter) / (float)(jc->inputVector+>size())) * 100 ;
+        jc->state.percentage = ((float)(jc->mapCounter) / (float)(jc->inputVector+>size())) * 100 ;
         mutexUnlock(jc->stateMutex);
 
-        oldVal = jc->startMapCounter;
+        oldVal = jc->mapCounter;
     }
 
 }
@@ -167,6 +171,8 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     // init counters
     jc->numIntermediaryElements = 0;
     jc->numOutputElements = 0;
+    jc->mapCounter = 0;
+    jc->reduceCounter = 0;
 
     // init vectors
     jc->mapOutputVector = new std::vector <IntermediatePair>();
@@ -194,11 +200,26 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     for (int i = 0; i < multiThreadLevel; ++i)
     {
         jc->threadContexts[i].job = jc;
+        jc->threadContexts[i].client = &client;
     }
     return (JobHandle)jc;
 }
-
-void waitForJob(JobHandle job);
+/**
+ * The function gets JobHandle returned by startMapReduceFramework and waits
+ * until it is finished.
+ * @param job the job we want to waiting for
+ */
+void waitForJob(JobHandle job)
+{
+    jobContext* jc = (jobContext*) job;
+    for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
+        if (pthread_join(jc->threadContexts[i].threadId, nullptr) != 0)
+        {
+            std::cerr << SYS_ERROR << THREAD_JOIN_FAIL << std::endl;
+            exit(FAILURE);
+        }
+    }
+}
 /**
  * The function gets a JobHandle and updates the state of the job into the given
  * JobState struct.
@@ -245,7 +266,13 @@ void closeJobHandle(JobHandle job)
 
 }
 
-
+/**
+ * The reducing threads will wait for the shuffled vectors to be created by the shuffling thread.
+ * Once they wake up, they can pop a vector from the back of the queue and run reduce on it
+ * The reduce function in turn will produce (k3, v3) pairs and will call emit3 to add them to the
+ * framework data structures.
+ * @param context context of a thread
+ */
 void reducePhase(ThreadContext* context) {
     jobContext* jc = context->job;
     unsigned int old_val = jc->reduceCounter;
