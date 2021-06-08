@@ -31,11 +31,13 @@ struct jobContext{
     std::vector <InputPair> inputVector{};
     std::vector <IntermediatePair> mapOutputVector{};
     std::vector <OutputPair> reduceOutputVector{};
+    std::vector <IntermediatePair> inputSortedandShuffledVec{};
 
     std::atomic<unsigned int> numIntermediaryElements{};
     std::atomic<unsigned int> numOutputElements{};
     std::atomic<unsigned int> startMapCounter{};
     std::atomic<unsigned int> finishMapCounter{};
+    std::atomic<unsigned int> reduceCounter{};
 
     pthread_mutex_t stateMutex;
     pthread_mutex_t mapOutputVecMutex;
@@ -241,4 +243,21 @@ void closeJobHandle(JobHandle job)
     delete currJob->mapOutputVector;
     delete currJob;
 
+}
+
+
+void reducePhase(ThreadContext* context) {
+    jobContext* jc = context->job;
+    unsigned int old_val = jc->reduceCounter;
+    while (old_val < (unsigned int) jc->inputSortedandShuffledVec.size()) {
+        jc->reduceCounter++;
+        K2* key = (*jc->inputSortedandShuffledVec)[old_val].first;
+        V2* val = (*jc->inputSortedandShuffledVec)[old_val].second;
+        context->client->reduce(key, val, context);
+        
+        mutexLock(jc->stateMutex);
+        jc->state.precentage = ((float)(jc->reduceCounter) / (float)(jc->inputSortedandShuffledVec->size())) * 100;
+        mutexUnlock(jc->stateMutex);
+        old_val = jc->reduceCounter;
+    }
 }
