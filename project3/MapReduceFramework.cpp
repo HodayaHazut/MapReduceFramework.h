@@ -15,7 +15,8 @@
  */
 struct ThreadContext {
     pthread_t threadId;
-    jobContext* littleJob;
+    jobContext* job;
+    MapReduceClient* client;
 };
 
 /**
@@ -32,6 +33,8 @@ struct jobContext{
 
     std::atomic<unsigned int> numIntermediaryElements{};
     std::atomic<unsigned int> numOutputElements{};
+    std::atomic<unsigned int> startMapCounter{};
+    std::atomic<unsigned int> finishMapCounter{};
 
     pthread_mutex_t stateMutex;
     pthread_mutex_t mapOutputVecMutex;
@@ -74,11 +77,11 @@ void emit2 (K2* key, V2* value, void* context)
 {
     ThreadContext* currThreadContext = (ThreadContext*) context;
     std::pair <K2*,V2*> pair (key,value);
-    currThreadContext->littleJob->numIntermediaryElements++;
+    currThreadContext->job->numIntermediaryElements++;
     // protect with mutex
-    mutexLock(currThreadContext->littleJob->mapOutputVecMutex);
-    currThreadContext->littleJob->mapOutputVector.push_back(pair);
-    mutexUnlock(currThreadContext->littleJob->mapOutputVecMutex);
+    mutexLock(currThreadContext->job->mapOutputVecMutex);
+    currThreadContext->job->mapOutputVector.push_back(pair);
+    mutexUnlock(currThreadContext->job->mapOutputVecMutex);
 }
 /**
  * The function receives as input output element (K3, V3) and context which contains data
@@ -93,15 +96,42 @@ void emit3 (K3* key, V3* value, void* context)
 {
     ThreadContext* currThreadContext = (ThreadContext*) context;
     std::pair <K3*,V3*> pair (key,value);
-    currThreadContext->littleJob->numOutputElements++;
+    currThreadContext->job->numOutputElements++;
     // protect with mutex
-    mutexLock(currThreadContext->littleJob->reduceOutputVecMutex);
-    currThreadContext->littleJob->reduceOutputVector.push_back(pair);
-    mutexUnlock(currThreadContext->littleJob->reduceOutputVecMutex);
+    mutexLock(currThreadContext->job->reduceOutputVecMutex);
+    currThreadContext->job->reduceOutputVector.push_back(pair);
+    mutexUnlock(currThreadContext->job->reduceOutputVecMutex);
 }
-void* jobManager(void* context)
+void mapPhase(ThreadContext* context)
 {
-    return nullptr;
+    jobContext* jc = context->job;
+    unsigned int oldVal = jc->startMapCounter;
+    while (oldVal < (unsigned int) jc->inputVector->size())
+    {
+        jc->startMapCounter++;
+        context->client->map((*jc->inputVector)[oldVal].first, (*jc->inputVector)[oldVal].second, context);
+
+        jc->finishMapCounter++;
+
+        mutexLock(jc->stateMutex);
+        jc->state.percentage = ((float)(jc->finishMapCounter) / (float)(jc->inputVector+>size())) * 100 ;
+        mutexUnlock(jc->stateMutex);
+
+        oldVal = jc->startMapCounter;
+    }
+
+}
+void jobManager(void* context)
+{
+    ThreadContext* currThreadContext = (ThreadContext*) context;
+
+    // change the state
+    mutexLock(currThreadContext->job->stateMutex);
+    currThreadContext->job->state.stage = MAP_STAGE;
+    mutexUnlock(currThreadContext->job->stateMutex);
+
+    mapPhase(currThreadContext);
+    // manage all the other phases
 }
 /**
  * The function starts running the MapReduce algorithm (with several threads) and returns a JobHandle
@@ -149,7 +179,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     }
 
     // creat threads
-    for (int i = 0; i < multiThreadLevel - 1; ++i)
+    for (int i = 0; i < multiThreadLevel; ++i)
     {
         if (pthread_create(&jc->threadContexts[i].threadId, nullptr, jobManager, &jc->threadContexts[i]) != 0)
         {
@@ -160,8 +190,9 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     // create threadContext for each thread
     for (int i = 0; i < multiThreadLevel; ++i)
     {
-        jc->threadContexts[i].littleJob = jc;
+        jc->threadContexts[i].job = jc;
     }
+    return (JobHandle)jc;
 }
 
 void waitForJob(JobHandle job);
