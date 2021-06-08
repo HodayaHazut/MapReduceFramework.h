@@ -10,6 +10,7 @@
 #define MUTEX_UNLOCK_ERR "the mutex unlock failed"
 #define ALLOC_ERROR "allocation failed"
 #define THREAD_CREATE_FAIL "thread creation fail"
+#define  MUTEX_DESTROY_FAIL "mutex destroy fail"
 /**
  * Define the context of each thread.
  */
@@ -210,5 +211,34 @@ void getJobState(JobHandle job, JobState* state)
     state->percentage = currJob->state.percentage;
     mutexUnlock(&currJob->stateMutex);
 }
+/**
+ * Releasing all resources of a job. You should prevent releasing resources before the job finished.
+ * After this function is called the job handle will be invalid.
+ * @param job releasing all resources of this job.
+ */
+void closeJobHandle(JobHandle job)
+{
+    waitForJob(job);
 
-void closeJobHandle(JobHandle job);
+    jobContext* currJob = (jobContext*) job;
+
+    if (pthread_mutex_destroy(&currJob->stateMutex) != 0)
+    {
+        std::cerr << SYS_ERROR << MUTEX_DESTROY_FAIL << std::endl;
+        exit(FAILURE);
+    }
+    if (pthread_mutex_destroy(&currJob->reduceOutputVecMutex) != 0)
+    {
+        std::cerr << SYS_ERROR << MUTEX_DESTROY_FAIL << std::endl;
+        exit(FAILURE);
+    }
+    if (pthread_mutex_destroy(&currJob->mapOutputVecMutex) != 0)
+    {
+        std::cerr << SYS_ERROR << MUTEX_DESTROY_FAIL << std::endl;
+        exit(FAILURE);
+    }
+    delete [] currJob->threadContexts;
+    delete currJob->mapOutputVector;
+    delete currJob;
+
+}
