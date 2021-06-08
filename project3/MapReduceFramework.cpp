@@ -9,7 +9,7 @@
 #define MUTEX_LOCK_ERR "the mutex lock failed"
 #define MUTEX_UNLOCK_ERR "the mutex unlock failed"
 #define ALLOC_ERROR "allocation failed"
-
+#define THREAD_CREATE_FAIL "thread creation fail"
 /**
  * Define the context of each thread.
  */
@@ -99,6 +99,10 @@ void emit3 (K3* key, V3* value, void* context)
     currThreadContext->littleJob->reduceOutputVector.push_back(pair);
     mutexUnlock(currThreadContext->littleJob->reduceOutputVecMutex);
 }
+void* jobManager(void* context)
+{
+    return nullptr;
+}
 /**
  * The function starts running the MapReduce algorithm (with several threads) and returns a JobHandle
  * @param client The implementation of MapReduceClient or in other words the task that the
@@ -144,8 +148,17 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
         exit(FAILURE);
     }
 
+    // creat threads
+    for (int i = 0; i < multiThreadLevel - 1; ++i)
+    {
+        if (pthread_create(&jc->threadContexts[i].threadId, nullptr, jobManager, &jc->threadContexts[i]) != 0)
+        {
+            std::cerr << SYS_ERROR << THREAD_CREATE_FAIL << std::endl;
+            exit(FAILURE);
+        }
+    }
     // create threadContext for each thread
-    for (int i = 0l i< multiThreadLevel; i++)
+    for (int i = 0; i < multiThreadLevel; ++i)
     {
         jc->threadContexts[i].littleJob = jc;
     }
