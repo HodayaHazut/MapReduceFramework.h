@@ -288,3 +288,21 @@ void reducePhase(ThreadContext* context) {
         old_val = jc->reduceCounter;
     }
 }
+
+
+bool sortKeys(const IntermediatePair &left, onst IntermediatePair &right) {
+    return (*left.first) < (*right.first)
+
+void sortPhase(ThreadContext* context) {
+    jobContext* jc = context->job;
+    jc->mapCounter = 0;
+    unsigned int old_val = jc->mapCounter;
+    while (old_val < jc.mapOutputVector->size()) {
+        jc->mapCounter++;
+        std::sort((jc->mapOutoutVector)[old_val].begin(), jc->mapOutputVector[old_val].end(), sortKeys);
+    }
+}
+
+
+
+    
