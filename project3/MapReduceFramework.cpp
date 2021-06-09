@@ -44,13 +44,14 @@ struct jobContext{
 
     std::atomic<unsigned int> numIntermediaryElements{};
     std::atomic<unsigned int> numOutputElements{};
-    std::atomic<unsigned int> mapCounter{};
+    std::atomic<unsigned int> progressCounter{};
     std::atomic<unsigned int> reduceCounter{};
     std::atomic<unsigned int> numOfK2Pairs{};
 
     pthread_mutex_t stateMutex{};
     pthread_mutex_t mapOutputVecMutex{};
     pthread_mutex_t reduceOutputVecMutex{};
+    pthread_mutex_t sortMutex{};
 
     bool wasInWaitForJob{};
     Barrier* barrier{};
@@ -146,19 +147,19 @@ void emit3 (K3* key, V3* value, void* context)
 void mapPhase(ThreadContext* context)
 {
     jobContext* jc = context->job;
-    unsigned int oldVal = jc->mapCounter;
+    unsigned int oldVal = jc->progressCounter;
     while (oldVal < (unsigned int) jc->inputVector->size())
     {
-        jc->mapCounter++;
+        jc->progressCounter++;
         K1* key = (*jc->inputVector)[oldVal].first;
         V1* val = (*jc->inputVector)[oldVal].second;
         context->client->map(key, val, context);
 
         mutexLock(&jc->stateMutex);
-        jc->state.percentage = ((float)(jc->mapCounter) / (float)(jc->inputVector->size())) * 100 ;
+        jc->state.percentage = ((float)(jc->progressCounter) / (float)(jc->inputVector->size())) * 100 ;
         mutexUnlock(&jc->stateMutex);
 
-        oldVal = jc->mapCounter;
+        oldVal = jc->progressCounter;
     }
 
 }
@@ -200,7 +201,7 @@ void initVectors(const InputVec &inputVec, OutputVec &outputVec, jobContext *jc)
 void initCounters(jobContext *jc) {
     jc->numIntermediaryElements = 0;
     jc->numOutputElements = 0;
-    jc->mapCounter = 0;
+    jc->progressCounter = 0;
     jc->reduceCounter = 0;
     jc->numOfK2Pairs = 0;
 }
@@ -224,6 +225,11 @@ void initMutexes(jobContext *jc) {
         exit(FAILURE);
     }
     if(pthread_mutex_init(&jc->reduceOutputVecMutex, nullptr) != 0)
+    {
+        std::cerr << SYS_ERROR << "mutex create fail" << std::endl;
+        exit(FAILURE);
+    }
+    if(pthread_mutex_init(&jc->sortMutex, nullptr) != 0)
     {
         std::cerr << SYS_ERROR << "mutex create fail" << std::endl;
         exit(FAILURE);
@@ -396,12 +402,14 @@ bool sortKeys(const IntermediatePair &left, const IntermediatePair &right) {
  */
 void sortPhase(ThreadContext* context) {
     jobContext* jc = context->job;
-    jc->mapCounter = 0;
-    unsigned int old_val = jc->mapCounter;
+    jc->progressCounter = 0;
+    unsigned int old_val = jc->progressCounter;
     while (old_val < jc->mapOutputVector->size()) {
-        jc->mapCounter++;
+        mutexLock(&jc->sortMutex);
+        jc->progressCounter++;
         std::sort((jc->mapOutputVector)[old_val].begin(), jc->mapOutputVector[old_val].end(), sortKeys);
-        old_val = jc->mapCounter;
+        old_val = jc->progressCounter;
+        mutexUnlock(&jc->sortMutex);
     }
 }
 
@@ -420,7 +428,7 @@ void shufflePhase(ThreadContext* context) {
 //    ThreadContext shuffler = jc->threadContexts[0]; // get jc->ThreadContexts[0]
     mutexLock(&jc->stateMutex);
     jc->state.stage = SHUFFLE_STAGE;
-    jc->state.percentage = ((float) jc->mapCounter / (float)(jc->numOfK2Pairs)) * 100;
+    jc->state.percentage = ((float) jc->progressCounter / (float)(jc->numOfK2Pairs)) * 100;
     mutexUnlock(&jc->stateMutex);
 
     // inputSortedandShuffledVec holds all pairs
