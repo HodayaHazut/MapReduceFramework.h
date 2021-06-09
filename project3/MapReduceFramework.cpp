@@ -176,8 +176,29 @@ void* jobManager(void* context)
     sortPhase(currThreadContext);
 
     currThreadContext->job->barrier->barrier();
-    //shufflePhase(currThreadContext);
-    // reducePhase(currThreadContext);
+
+    if (currThreadContext->job->threadContextsVec[0].threadId == currThreadContext->threadId)
+    {
+        shufflePhase(currThreadContext);
+    }
+    reducePhase(currThreadContext);
+    return nullptr;
+}
+
+void* threadDoingShuffle(void* context)
+{
+    auto* currThreadContext = (ThreadContext*) context;
+
+    mutexLock(&currThreadContext->job->stateMutex);
+    currThreadContext->job->state.stage = MAP_STAGE;
+    mutexUnlock(&currThreadContext->job->stateMutex);
+
+    mapPhase(currThreadContext);
+    sortPhase(currThreadContext);
+
+    currThreadContext->job->barrier->barrier();
+    shufflePhase(currThreadContext);
+    reducePhase(currThreadContext);
     return nullptr;
 }
 
@@ -289,7 +310,13 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
             exit(FAILURE);
         }
     }
-
+    // create thread doing shuffle
+//    if (pthread_create(&jc->threadContextsVec[multiThreadLevel - 1].threadId, nullptr,
+//                       threadDoingShuffle, &jc->threadContextsVec[multiThreadLevel - 1]) != 0)
+//    {
+//        std::cerr << SYS_ERROR << THREAD_CREATE_FAIL << std::endl;
+//        exit(FAILURE);
+//    }
     return (JobHandle)jc;
 }
 
@@ -301,7 +328,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
  */
 void waitForJob(JobHandle job)
 {
-    auto * jc = (jobContext*) job;
+    auto* jc = (jobContext*) job;
     for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
         if (pthread_join(jc->threadContextsVec[i].threadId, nullptr) != 0)
         {
@@ -402,15 +429,16 @@ bool sortKeys(const IntermediatePair &left, const IntermediatePair &right) {
  */
 void sortPhase(ThreadContext* context) {
     jobContext* jc = context->job;
-    jc->progressCounter = 0;
-    unsigned int old_val = jc->progressCounter;
-    while (old_val < jc->mapOutputVector->size()) {
-        mutexLock(&jc->sortMutex);
-        jc->progressCounter++;
-        std::sort((jc->mapOutputVector)[old_val].begin(), jc->mapOutputVector[old_val].end(), sortKeys);
-        old_val = jc->progressCounter;
-        mutexUnlock(&jc->sortMutex);
-    }
+//    jc->progressCounter = 0;
+//    unsigned int old_val = jc->progressCounter;
+//    while (old_val < jc->mapOutputVector->size()) {
+//        mutexLock(&jc->sortMutex);
+//        jc->progressCounter++;
+//        std::sort(jc->mapOutputVector[old_val].begin(), jc->mapOutputVector[old_val].end(), sortKeys);
+//        old_val = jc->progressCounter;
+//        mutexUnlock(&jc->sortMutex);
+//    }
+    std::sort(jc->mapOutputVector->begin(), jc->mapOutputVector->end(), sortKeys);
 }
 
 /**
