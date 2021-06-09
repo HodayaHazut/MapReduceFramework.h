@@ -28,6 +28,7 @@ void reducePhase(ThreadContext* context);
 
 // TODO: need to update deletes for ALL data structures
 
+
 /**
  * Define the context of new job that run the MapReduce model.
  */
@@ -45,6 +46,7 @@ struct jobContext{
     std::atomic<unsigned int> numOutputElements{};
     std::atomic<unsigned int> mapCounter{};
     std::atomic<unsigned int> reduceCounter{};
+    std::atomic<unsigned int> numOfK2Pairs{};
 
     pthread_mutex_t stateMutex{};
     pthread_mutex_t mapOutputVecMutex{};
@@ -109,6 +111,7 @@ void emit2 (K2* key, V2* value, void* context)
     // protect with mutex
     mutexLock(&currThreadContext->job->mapOutputVecMutex);
     currThreadContext->job->mapOutputVector->push_back(pair);
+    currThreadContext->job->numOfK2Pairs++;
     mutexUnlock(&currThreadContext->job->mapOutputVecMutex);
 }
 
@@ -160,12 +163,10 @@ void mapPhase(ThreadContext* context)
 
 }
 
-
 void* jobManager(void* context)
 {
     auto* currThreadContext = (ThreadContext*) context;
 
-    // change the state
     mutexLock(&currThreadContext->job->stateMutex);
     currThreadContext->job->state.stage = MAP_STAGE;
     mutexUnlock(&currThreadContext->job->stateMutex);
@@ -174,11 +175,60 @@ void* jobManager(void* context)
     sortPhase(currThreadContext);
 
     currThreadContext->job->barrier->barrier();
-    shufflePhase(currThreadContext);
-    reducePhase(currThreadContext);
+    //shufflePhase(currThreadContext);
+    // reducePhase(currThreadContext);
     return nullptr;
 }
 
+void initVectors(const InputVec &inputVec, OutputVec &outputVec, jobContext *jc) {
+    jc->mapOutputVector = new std::vector <IntermediatePair>();
+    if (jc->mapOutputVector == nullptr)
+    {
+        std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
+        exit(FAILURE);
+    }
+    jc->reduceOutputVector = &outputVec;
+    jc->inputVector = (InputVec*)&inputVec;
+    jc->inputSortedandShuffledVec = new std::vector<IntermediatePair>();
+    if (jc->inputSortedandShuffledVec == nullptr)
+    {
+        std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
+        exit(FAILURE);
+    }
+}
+
+void initCounters(jobContext *jc) {
+    jc->numIntermediaryElements = 0;
+    jc->numOutputElements = 0;
+    jc->mapCounter = 0;
+    jc->reduceCounter = 0;
+    jc->numOfK2Pairs = 0;
+}
+
+void initState(jobContext *jc) {
+    mutexLock(&jc->stateMutex);
+    jc->state.stage = UNDEFINED_STAGE;
+    jc->state.percentage = 0;
+    mutexUnlock(&jc->stateMutex);
+}
+
+void initMutexes(jobContext *jc) {
+    if(pthread_mutex_init(&jc->stateMutex, nullptr) != 0)
+    {
+        std::cerr << SYS_ERROR << "mutex create fail" << std::endl;
+        exit(FAILURE);
+    }
+    if(pthread_mutex_init(&jc->mapOutputVecMutex, nullptr) != 0)
+    {
+        std::cerr << SYS_ERROR << "mutex create fail" << std::endl;
+        exit(FAILURE);
+    }
+    if(pthread_mutex_init(&jc->reduceOutputVecMutex, nullptr) != 0)
+    {
+        std::cerr << SYS_ERROR << "mutex create fail" << std::endl;
+        exit(FAILURE);
+    }
+}
 
 /**
  * The function starts running the MapReduce algorithm (with several threads) and returns a JobHandle
@@ -199,33 +249,18 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 
     //init thread contexts vector
     jc->threadContextsVec = new ThreadContext[multiThreadLevel];
-
-    // init mutexes
-    pthread_mutex_init(&jc->stateMutex, nullptr);
-    pthread_mutex_init(&jc->mapOutputVecMutex, nullptr);
-    pthread_mutex_init(&jc->reduceOutputVecMutex, nullptr);
-
-    // init state
-    mutexLock(&jc->stateMutex);
-    jc->state.stage = UNDEFINED_STAGE;
-    jc->state.percentage = 0;
-    mutexUnlock(&jc->stateMutex);
-
-    // init counters
-    jc->numIntermediaryElements = 0;
-    jc->numOutputElements = 0;
-    jc->mapCounter = 0;
-    jc->reduceCounter = 0;
-
-    // init vectors
-    jc->mapOutputVector = new std::vector <IntermediatePair>();
-    jc->reduceOutputVector = &outputVec;
-    jc->inputVector = (InputVec*)&inputVec;
-    jc->inputSortedandShuffledVec = new std::vector<IntermediatePair>();
+    if (jc->threadContextsVec == nullptr)
+    {
+        std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
+        exit(FAILURE);
+    }
+    initMutexes(jc);
+    initState(jc);
+    initCounters(jc);
+    initVectors(inputVec, outputVec, jc);
 
     jc->barrier = new Barrier(multiThreadLevel);
-
-    if (jc->threadContextsVec == nullptr)
+    if (jc->barrier == nullptr)
     {
         std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
         exit(FAILURE);
@@ -239,9 +274,9 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     }
 
     // create threads
-    for (int i = 0; i < multiThreadLevel - 1; ++i)
+    for (int i = 0; i < multiThreadLevel; ++i)
     {
-        if (pthread_create(&(jc->threadContextsVec[i].threadId), nullptr,
+        if (pthread_create(&jc->threadContextsVec[i].threadId, nullptr,
                            jobManager, &jc->threadContextsVec[i]) != 0)
         {
             std::cerr << SYS_ERROR << THREAD_CREATE_FAIL << std::endl;
@@ -252,6 +287,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     return (JobHandle)jc;
 }
 
+
 /**
  * The function gets JobHandle returned by startMapReduceFramework and waits
  * until it is finished.
@@ -259,15 +295,13 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
  */
 void waitForJob(JobHandle job)
 {
-    auto* jc = (jobContext*) job;
-    if (!jc->wasInWaitForJob){
-        for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
-            if (pthread_join(jc->threadContextsVec[i].threadId, nullptr) != 0) {
-                std::cerr << SYS_ERROR << THREAD_JOIN_FAIL << std::endl;
-                exit(FAILURE);
-            }
+    auto * jc = (jobContext*) job;
+    for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
+        if (pthread_join(jc->threadContextsVec[i].threadId, nullptr) != 0)
+        {
+            std::cerr << SYS_ERROR << THREAD_JOIN_FAIL << std::endl;
+            exit(FAILURE);
         }
-        jc->wasInWaitForJob = true;
     }
 }
 
@@ -315,7 +349,6 @@ void closeJobHandle(JobHandle job)
         exit(FAILURE);
     }
     delete [] currJob->threadContextsVec;
-    delete currJob->mapOutputVector;
     delete currJob;
 
 }
@@ -330,13 +363,16 @@ void closeJobHandle(JobHandle job)
  */
 void reducePhase(ThreadContext* context) {
     jobContext* jc = context->job;
+    mutexLock(&jc->stateMutex);
+    jc->state.stage = REDUCE_STAGE;
+    mutexUnlock(&jc->stateMutex);
     unsigned int old_val = jc->reduceCounter;
     while (old_val < (unsigned int) jc->inputSortedandShuffledVec->size()) {
         jc->reduceCounter++;
 //        K2* key = (*jc->inputSortedandShuffledVec)[old_val].first;
 //        V2* val = (*jc->inputSortedandShuffledVec)[old_val].second;
         context->client->reduce(&(jc->inputSortedandShuffledVec)[old_val], context);
-        
+
         mutexLock(&jc->stateMutex);
         jc->state.percentage = ((float)(jc->reduceCounter) / (float)(jc->inputSortedandShuffledVec->size())) * 100;
         mutexUnlock(&jc->stateMutex);
@@ -351,7 +387,7 @@ void reducePhase(ThreadContext* context) {
  * @return bool if left_key < right_key
  */
 bool sortKeys(const IntermediatePair &left, const IntermediatePair &right) {
-return (*left.first) < (*right.first);
+    return (*left.first) < (*right.first);
 }
 
 /**
@@ -365,6 +401,7 @@ void sortPhase(ThreadContext* context) {
     while (old_val < jc->mapOutputVector->size()) {
         jc->mapCounter++;
         std::sort((jc->mapOutputVector)[old_val].begin(), jc->mapOutputVector[old_val].end(), sortKeys);
+        old_val = jc->mapCounter;
     }
 }
 
@@ -373,22 +410,24 @@ void sortPhase(ThreadContext* context) {
  * @param context to handle
  */
 void shufflePhase(ThreadContext* context) {
-    // SHUFFLER THREAD IS THE FIRST THREAD THAT BEEN CREATED A.K.A THREAD[0] 
-    // we wamt to run over all ThreadContext and collect mapOutputVector from each tc objects 
+    // SHUFFLER THREAD IS THE FIRST THREAD THAT BEEN CREATED A.K.A THREAD[0]
+    // we wamt to run over all ThreadContext and collect mapOutputVector from each tc objects
     // into one vector. next step will be to sort them by key. in this stage we'll hope to have a sorted vector of pairs from all ThreadContext.
-    
-    
+
+
     // either we check that context of input is the first thread to be created or get it
     auto* jc = context->job;
 //    ThreadContext shuffler = jc->threadContexts[0]; // get jc->ThreadContexts[0]
-    
+    mutexLock(&jc->stateMutex);
     jc->state.stage = SHUFFLE_STAGE;
-    
+    jc->state.percentage = ((float) jc->mapCounter / (float)(jc->numOfK2Pairs)) * 100;
+    mutexUnlock(&jc->stateMutex);
+
     // inputSortedandShuffledVec holds all pairs
     for (int i = 0; i < jc->MULTI_THREAD_NUM; i++) {
         std::copy(jc->threadContextsVec[i].job->mapOutputVector->begin(), jc->threadContextsVec[i].job->mapOutputVector->end(), back_inserter(*jc->inputSortedandShuffledVec));
     }
-                  
+
     // now lets sort mapOutputVector
     std::sort(jc->inputSortedandShuffledVec->begin(), jc->inputSortedandShuffledVec->end(), sortKeys);
 }
