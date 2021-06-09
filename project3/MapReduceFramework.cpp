@@ -41,6 +41,7 @@ struct jobContext{
     std::vector <IntermediatePair>* mapOutputVector{};
     std::vector <OutputPair>* reduceOutputVector{};
     std::vector <IntermediatePair>* inputSortedandShuffledVec{};
+    std::vector <std::vector<IntermediatePair>*>vecOfVecsForReduce{};
 
     std::atomic<unsigned int> numIntermediaryElements{};
     std::atomic<unsigned int> numOutputElements{};
@@ -329,12 +330,15 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 void waitForJob(JobHandle job)
 {
     auto* jc = (jobContext*) job;
-    for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
-        if (pthread_join(jc->threadContextsVec[i].threadId, nullptr) != 0)
-        {
-            std::cerr << SYS_ERROR << THREAD_JOIN_FAIL << std::endl;
-            exit(FAILURE);
+    if (!jc->wasInWaitForJob) {
+        for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
+            if (pthread_join(jc->threadContextsVec[i].threadId, nullptr) != 0)
+            {
+                std::cerr << SYS_ERROR << THREAD_JOIN_FAIL << std::endl;
+                exit(FAILURE);
+            }
         }
+        jc->wasInWaitForJob = true;
     }
 }
 
@@ -400,14 +404,13 @@ void reducePhase(ThreadContext* context) {
     jc->state.stage = REDUCE_STAGE;
     mutexUnlock(&jc->stateMutex);
     unsigned int old_val = jc->reduceCounter;
-    while (old_val < (unsigned int) jc->inputSortedandShuffledVec->size()) {
+    while (old_val < (unsigned int) jc->vecOfVecsForReduce.size()) {
         jc->reduceCounter++;
-//        K2* key = (*jc->inputSortedandShuffledVec)[old_val].first;
-//        V2* val = (*jc->inputSortedandShuffledVec)[old_val].second;
-        context->client->reduce(&(jc->inputSortedandShuffledVec)[old_val], context);
+
+        context->client->reduce(jc->vecOfVecsForReduce[old_val], context);
 
         mutexLock(&jc->stateMutex);
-        jc->state.percentage = ((float)(jc->reduceCounter) / (float)(jc->inputSortedandShuffledVec->size())) * 100;
+        jc->state.percentage = ((float)(jc->reduceCounter) / (float)(jc->vecOfVecsForReduce.size())) * 100;
         mutexUnlock(&jc->stateMutex);
         old_val = jc->reduceCounter;
     }
