@@ -346,9 +346,8 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
             std::cerr << SYS_ERROR << THREAD_CREATE_FAIL << std::endl;
             exit(FAILURE);
         }
-
-        return (JobHandle) jc;
     }
+    return (JobHandle) jc;
 }
 
 
