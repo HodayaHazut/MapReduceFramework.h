@@ -216,23 +216,15 @@ void reducePhase(ThreadContext *context) {
     jc->state.percentage = 0;
     mutexUnlock(&jc->stateMutex);
 
-    while (true) {
-        mutexLock(&jc->reduceOutputVecMutex);
-        auto pair = jc->shuffleMap.begin();
-        if (pair == jc->shuffleMap.end()) {
-            mutexUnlock(&jc->reduceOutputVecMutex);
-            break;
-        }
-        auto vectorToReduce = pair->second;
-        jc->shuffleMap.erase(pair);
-        mutexUnlock(&jc->reduceOutputVecMutex);
-
+    for (auto itr = jc->shuffleMap.begin(); itr != jc->shuffleMap.end(); ++itr) {
+        auto vectorToReduce = itr->second;
         context->client->reduce(vectorToReduce, context->job);
         jc->reduceProgressCounter++;
 
         mutexLock(&jc->stateMutex);
         jc->state.percentage = ((float) (jc->reduceProgressCounter) / (float) (jc->shuffleMap.size())) * 100;
         mutexUnlock(&jc->stateMutex);
+
     }
 
 }
@@ -246,20 +238,20 @@ void* jobManager(void* context)
 
     mapPhase(currThreadContext);
     sortPhase(currThreadContext);
-    std::cerr << "1" << std::endl;
+
     currThreadContext->barrier->barrier();
-    std::cerr << "2" << std::endl;
+
     if (currThreadContext->job->threadContextsVec[0].threadId == currThreadContext->threadId)
     {
-        std::cerr << "3" << std::endl;
+
         shufflePhase(currThreadContext);
-        std::cerr << "4" << std::endl;
+
     }
-    std::cerr << "5" << std::endl;
+
     currThreadContext->barrier->barrier();
-    std::cerr << "6" << std::endl;
+
     reducePhase(currThreadContext);
-    std::cerr << "7" << std::endl;
+
     return nullptr;
 }
 
@@ -336,13 +328,13 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     initCounters(jc);
     initVectors(inputVec, outputVec, jc);
 
-    Barrier barrier(multiThreadLevel);
+    Barrier* barrier = new Barrier(multiThreadLevel);
 
     // create threadContext for each thread
     for (int i = 0; i < multiThreadLevel; ++i) {
         jc->threadContextsVec[i].job = jc;
         jc->threadContextsVec[i].client = &client;
-        jc->threadContextsVec[i].barrier = &barrier;
+        jc->threadContextsVec[i].barrier = barrier;
     }
 
     // create threads
