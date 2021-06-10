@@ -336,13 +336,13 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     initCounters(jc);
     initVectors(inputVec, outputVec, jc);
 
-    Barrier barrier(multiThreadLevel);
+    Barrier* barrier = new Barrier(multiThreadLevel);
 
     // create threadContext for each thread
     for (int i = 0; i < multiThreadLevel; ++i) {
         jc->threadContextsVec[i].job = jc;
         jc->threadContextsVec[i].client = &client;
-        jc->threadContextsVec[i].barrier = &barrier;
+        jc->threadContextsVec[i].barrier = barrier;
     }
 
     // create threads
