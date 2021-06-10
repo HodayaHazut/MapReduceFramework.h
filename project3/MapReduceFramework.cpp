@@ -54,7 +54,6 @@ struct jobContext{
     pthread_mutex_t reduceOutputVecMutex{};
 
     bool wasInWaitForJob{};
-    Barrier* barrier{};
 };
 
 
@@ -66,6 +65,7 @@ struct ThreadContext {
     jobContext* job{};
     IntermediateVec* mapOutputVector{};
     const MapReduceClient* client{};
+    Barrier* barrier{};
 };
 
 
@@ -327,16 +327,13 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     initCounters(jc);
     initVectors(inputVec, outputVec, jc);
 
-    jc->barrier = new Barrier(multiThreadLevel);
-    if (jc->barrier == nullptr) {
-        std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
-        exit(FAILURE);
-    }
+    Barrier barrier(multiThreadLevel);
 
     // create threadContext for each thread
     for (int i = 0; i < multiThreadLevel; ++i) {
         jc->threadContextsVec[i].job = jc;
         jc->threadContextsVec[i].client = &client;
+        jc->threadContextsVec[i].barrier = &barrier;
     }
 
     // create threads
