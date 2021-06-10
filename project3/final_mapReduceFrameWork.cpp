@@ -21,33 +21,26 @@
 
 
 
-struct jobContext;
+struct ThreadContext;
+void mutexUnlock(pthread_mutex_t* mutex);
+void mutexLock(pthread_mutex_t* mutex);
+void sortPhase(ThreadContext* context);
+void shufflePhase(ThreadContext* context);
+void reducePhase(ThreadContext* context);
 
 // TODO: need to update deletes for ALL data structures
 
-
-/**
- * Define the context of each thread.
- */
-struct ThreadContext {
-    int threadId;
-    jobContext* job{};
-    IntermediateVec* mapOutputVector{};
-    const MapReduceClient* client{};
-    Barrier* barrier;
-};
 
 /**
  * Define the context of new job that run the MapReduce model.
  */
 struct jobContext{
     JobState state{};
-    ThreadContext* threadContextsVec; // vector of threads contexts
-    pthread_t* threads;
+    ThreadContext* threadContextsVec{}; // vector of threads contexts
     int MULTI_THREAD_NUM{};
 
-
     InputVec * inputVector{};
+    //std::vector <IntermediateVec*> shuffleOutputVector{};
     std::map<K2*, IntermediateVec*> shuffleMap{};
     OutputVec* reduceOutputVector{};
 
@@ -61,6 +54,18 @@ struct jobContext{
     pthread_mutex_t reduceOutputVecMutex{};
 
     bool wasInWaitForJob{};
+};
+
+
+/**
+ * Define the context of each thread.
+ */
+struct ThreadContext {
+    pthread_t threadId{};
+    jobContext* job{};
+    IntermediateVec* mapOutputVector{};
+    const MapReduceClient* client{};
+    Barrier* barrier{};
 };
 
 
@@ -136,7 +141,7 @@ void emit3 (K3* key, V3* value, void* context)
  * update the framework databases.
  * @param context context of a thread
  */
-void* mapPhase(ThreadContext* context)
+void mapPhase(ThreadContext* context)
 {
     jobContext* jc = context->job;
     unsigned int oldVal = jc->mapProgressCounter;
@@ -153,7 +158,7 @@ void* mapPhase(ThreadContext* context)
 
         oldVal = jc->mapProgressCounter;
     }
-    return nullptr;
+
 }
 /**
  * function sorts vector by key
@@ -169,22 +174,24 @@ bool sortKeys(const IntermediatePair &left, const IntermediatePair &right) {
  * handeling sorting phase hen we want to sort intermidiate vector of each thread
  * @param context thread context of weach we ant to sort its intermediate vec
  */
-void* sortPhase(ThreadContext *context) {
+void sortPhase(ThreadContext *context) {
     std::sort(context->mapOutputVector->begin(), context->mapOutputVector->end(), sortKeys);
-    return nullptr;
 }
 /**
  * we want that thread[0] will take all intermediate vecs from all threads and shuffle them into one vector
  * @param context to handle
  */
 void shufflePhase(ThreadContext *context) {
-
     auto* jc = context->job;
     for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
         while (! jc->threadContextsVec[i].mapOutputVector->empty())
         {
             IntermediatePair pair = jc->threadContextsVec[i].mapOutputVector->back();
             auto key = pair.first;
+            auto it = jc->shuffleMap.find(key);
+            if (it == jc->shuffleMap.end()) {
+                jc->shuffleMap[key] = new std::vector<IntermediatePair>();
+            }
             jc->shuffleMap[key]->push_back(pair);
             jc->shuffleProgressCounter++;
             jc->threadContextsVec[i].mapOutputVector->pop_back();
@@ -203,7 +210,6 @@ void shufflePhase(ThreadContext *context) {
  * @param context context of a thread
  */
 void reducePhase(ThreadContext *context) {
-    //  context->barrier->barrier();
     auto* jc = context->job;
     mutexLock(&jc->stateMutex);
     jc->state.stage = REDUCE_STAGE;
@@ -230,38 +236,42 @@ void reducePhase(ThreadContext *context) {
     }
 
 }
-
 void* jobManager(void* context)
 {
-    auto currThreadContext = (ThreadContext*) context;
+    auto* currThreadContext = (ThreadContext*) context;
 
     mutexLock(&currThreadContext->job->stateMutex);
     currThreadContext->job->state.stage = MAP_STAGE;
     mutexUnlock(&currThreadContext->job->stateMutex);
 
     mapPhase(currThreadContext);
-    std::cerr << "id1:" << currThreadContext->threadId << std::endl;
     sortPhase(currThreadContext);
-    std::cerr << "id:" << currThreadContext->threadId << std::endl;
-//    currThreadContext->barrier->barrier();
-//    std::cerr << "after id:" << currThreadContext->threadId << std::endl;
-//    if (currThreadContext->threadId == 0)
-//    {
-//        shufflePhase(currThreadContext);
-//    }
-//    reducePhase(currThreadContext);
+    std::cerr << "1" << std::endl;
+    currThreadContext->barrier->barrier();
+    std::cerr << "2" << std::endl;
+    if (currThreadContext->job->threadContextsVec[0].threadId == currThreadContext->threadId)
+    {
+        std::cerr << "3" << std::endl;
+        shufflePhase(currThreadContext);
+        std::cerr << "4" << std::endl;
+    }
+    std::cerr << "5" << std::endl;
+    currThreadContext->barrier->barrier();
+    std::cerr << "6" << std::endl;
+    reducePhase(currThreadContext);
+    std::cerr << "7" << std::endl;
     return nullptr;
 }
 
 void initVectors(const InputVec &inputVec, OutputVec &outputVec, jobContext *jc) {
-//    for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
-//        jc->threadContextsVec[i].mapOutputVector = new std::vector <IntermediatePair>();
-//        if (jc->threadContextsVec[i].mapOutputVector == nullptr)
-//        {
-//            std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
-//            exit(FAILURE);
-//        }
-//    }
+    for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
+        jc->threadContextsVec[i].mapOutputVector = new std::vector <IntermediatePair>();
+        if (jc->threadContextsVec[i].mapOutputVector == nullptr)
+        {
+            std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
+            exit(FAILURE);
+        }
+    }
 
     jc->reduceOutputVector = &outputVec;
     jc->inputVector = (InputVec*)&inputVec;
@@ -316,11 +326,11 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     jc->MULTI_THREAD_NUM = multiThreadLevel;
 
     //init thread contexts vector
-    ThreadContext contexts[multiThreadLevel];
-
-    pthread_t threads[multiThreadLevel];
-    jc->threads = threads;
-
+    jc->threadContextsVec = new ThreadContext[multiThreadLevel];
+    if (jc->threadContextsVec == nullptr) {
+        std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
+        exit(FAILURE);
+    }
     initMutexes(jc);
     initState(jc);
     initCounters(jc);
@@ -330,23 +340,15 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 
     // create threadContext for each thread
     for (int i = 0; i < multiThreadLevel; ++i) {
-        contexts[i].job = jc;
-        contexts[i].client = &client;
-        contexts[i].barrier = &barrier;
-        contexts[i].threadId = i;
-        contexts[i].mapOutputVector = new std::vector <IntermediatePair>();
-        if (contexts[i].mapOutputVector == nullptr)
-        {
-            std::cerr << SYS_ERROR << ALLOC_ERROR << std::endl;
-            exit(FAILURE);
-        }
+        jc->threadContextsVec[i].job = jc;
+        jc->threadContextsVec[i].client = &client;
+        jc->threadContextsVec[i].barrier = &barrier;
     }
-    jc->threadContextsVec = contexts;
 
     // create threads
     for (int i = 0; i < multiThreadLevel; ++i) {
-        if(pthread_create(threads + i, nullptr, jobManager, jc->threadContextsVec + i) != 0)
-        {
+        if (pthread_create(&jc->threadContextsVec[i].threadId, nullptr,
+                           jobManager, &jc->threadContextsVec[i]) != 0) {
             std::cerr << SYS_ERROR << THREAD_CREATE_FAIL << std::endl;
             exit(FAILURE);
         }
@@ -362,16 +364,16 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
  */
 void waitForJob(JobHandle job) {
     auto* jc = (jobContext*) job;
-    //  if (!jc->wasInWaitForJob) {
-    for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
-        if (pthread_join(jc->threads[i], nullptr) != 0)
-        {
-            std::cerr << SYS_ERROR << THREAD_JOIN_FAIL << std::endl;
-            exit(FAILURE);
+    if (!jc->wasInWaitForJob) {
+        for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
+            if (pthread_join(jc->threadContextsVec[i].threadId, nullptr) != 0)
+            {
+                std::cerr << SYS_ERROR << THREAD_JOIN_FAIL << std::endl;
+                exit(FAILURE);
+            }
         }
+        jc->wasInWaitForJob = true;
     }
-    //   jc->wasInWaitForJob = true;
-    // }
 }
 
 

@@ -251,10 +251,15 @@ void* jobManager(void* context)
 
     if (currThreadContext->job->threadContextsVec[0].threadId == currThreadContext->threadId)
     {
+
         shufflePhase(currThreadContext);
+
     }
+
     currThreadContext->barrier->barrier();
+
     reducePhase(currThreadContext);
+
     return nullptr;
 }
 
