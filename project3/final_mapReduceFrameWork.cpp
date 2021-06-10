@@ -47,13 +47,18 @@ struct jobContext{
     std::atomic<unsigned int> numIntermediaryElements{};
     std::atomic<unsigned int> mapProgressCounter{};
     std::atomic<unsigned int> shuffleProgressCounter{};
+    std::atomic<unsigned int> helperCounter{};
+    std::atomic<unsigned int> numAllIntermediaryPairs{};
     std::atomic<unsigned int> reduceProgressCounter{};
 
     pthread_mutex_t stateMutex{};
     pthread_mutex_t mapOutputVecMutex{};
     pthread_mutex_t reduceOutputVecMutex{};
+    pthread_mutex_t shuffleMutex{};
 
     bool wasInWaitForJob{};
+
+    std::vector<IntermediateVec*> shuffleVec{};
 };
 
 
@@ -108,6 +113,7 @@ void emit2 (K2* key, V2* value, void* context)
     auto* currThreadContext = (ThreadContext*) context;
     std::pair <K2*,V2*> pair (key,value);
     currThreadContext->job->numIntermediaryElements++;
+    currThreadContext->job->numAllIntermediaryPairs++;
     // protect with mutex
     mutexLock(&currThreadContext->job->mapOutputVecMutex);
     currThreadContext->mapOutputVector->push_back(pair);
@@ -181,26 +187,51 @@ void sortPhase(ThreadContext *context) {
  * we want that thread[0] will take all intermediate vecs from all threads and shuffle them into one vector
  * @param context to handle
  */
+
 void shufflePhase(ThreadContext *context) {
-    auto* jc = context->job;
-    for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
-        while (! jc->threadContextsVec[i].mapOutputVector->empty())
-        {
-            IntermediatePair pair = jc->threadContextsVec[i].mapOutputVector->back();
-            auto key = pair.first;
-            auto it = jc->shuffleMap.find(key);
-            if (it == jc->shuffleMap.end()) {
-                jc->shuffleMap[key] = new std::vector<IntermediatePair>();
-            }
-            jc->shuffleMap[key]->push_back(pair);
-            jc->shuffleProgressCounter++;
-            jc->threadContextsVec[i].mapOutputVector->pop_back();
-        }
-    }
+    auto jc = context->job;
     mutexLock(&jc->stateMutex);
     jc->state.stage = SHUFFLE_STAGE;
-    jc->state.percentage = ((float)(jc->shuffleProgressCounter) / (float)(jc->numIntermediaryElements)) * 100;
+    jc->state.percentage = 0;
     mutexUnlock(&jc->stateMutex);
+
+    while(true) {
+        IntermediatePair max_pair;
+        IntermediatePair cur_pair;
+        mutexLock(&jc->shuffleMutex);
+        for (int i = 0; i < jc->MULTI_THREAD_NUM; i++) {
+            if (jc->threadContextsVec[i].mapOutputVector->empty()) {continue;}
+            cur_pair = jc->threadContextsVec[i].mapOutputVector->back();
+            if (!max_pair.first || sortKeys(max_pair, cur_pair)) {max_pair = cur_pair;}
+        }
+        auto * temp_vec = new IntermediateVec();
+        for (int i = 0; i < jc->MULTI_THREAD_NUM; i++) {
+            if (jc->threadContextsVec[i].mapOutputVector->empty()) {continue;}
+            while (!(*jc->threadContextsVec[i].mapOutputVector->back().first < *max_pair.first) &&
+                   !(*max_pair.first < *jc->threadContextsVec[i].mapOutputVector->back().first)) {
+                IntermediatePair pair = jc->threadContextsVec[i].mapOutputVector->back();
+                jc->threadContextsVec[i].mapOutputVector->pop_back();
+                temp_vec->push_back(pair);
+                jc->shuffleProgressCounter++;
+                mutexLock(&jc->stateMutex);
+                jc->state.percentage = ((float)(jc->shuffleProgressCounter) / (float)(jc->numAllIntermediaryPairs)) * 100;
+                mutexUnlock(&jc->stateMutex);
+                jc->numIntermediaryElements--;
+                if (jc->threadContextsVec[i].mapOutputVector->empty()) {mutexUnlock(&jc->shuffleMutex);
+                    break;}
+            }
+        }
+        if (!temp_vec->empty()) {
+            //  K2* key = temp_vec[0].first;
+            jc->shuffleVec.push_back(temp_vec);
+
+        }
+        if (jc->numIntermediaryElements == 0) {mutexUnlock(&jc->shuffleMutex);
+            break;}
+        mutexUnlock(&jc->shuffleMutex);
+    }
+
+
 }
 /**
  * The reducing threads will wait for the shuffled vectors to be created by the shuffling thread.
@@ -210,23 +241,21 @@ void shufflePhase(ThreadContext *context) {
  * @param context context of a thread
  */
 void reducePhase(ThreadContext *context) {
-    auto* jc = context->job;
+    auto jc = context->job;
     mutexLock(&jc->stateMutex);
     jc->state.stage = REDUCE_STAGE;
     jc->state.percentage = 0;
     mutexUnlock(&jc->stateMutex);
-
-    for (auto itr = jc->shuffleMap.begin(); itr != jc->shuffleMap.end(); ++itr) {
-        auto vectorToReduce = itr->second;
-        context->client->reduce(vectorToReduce, context->job);
+    size_t ind = jc->helperCounter++;
+    while (ind < jc->shuffleVec.size()) {
+        context->client->reduce(jc->shuffleVec[ind], context->job);
         jc->reduceProgressCounter++;
-
         mutexLock(&jc->stateMutex);
-        jc->state.percentage = ((float) (jc->reduceProgressCounter) / (float) (jc->shuffleMap.size())) * 100;
+        jc->state.percentage = ((float) (jc->reduceProgressCounter) / (float) (jc->shuffleVec.size())) * 100;
         mutexUnlock(&jc->stateMutex);
-
+        jc->helperCounter++;
+        ind = jc->helperCounter;
     }
-
 }
 void* jobManager(void* context)
 {
@@ -273,6 +302,8 @@ void initCounters(jobContext *jc) {
     jc->numIntermediaryElements = 0;
     jc->mapProgressCounter = 0;
     jc->shuffleProgressCounter = 0;
+    jc->helperCounter = 0;
+    jc->numAllIntermediaryPairs = 0;
     jc->reduceProgressCounter = 0;
 }
 
@@ -295,6 +326,11 @@ void initMutexes(jobContext *jc) {
         exit(FAILURE);
     }
     if(pthread_mutex_init(&jc->reduceOutputVecMutex, nullptr) != 0)
+    {
+        std::cerr << SYS_ERROR << MUTEX_CREATE_FAIL << std::endl;
+        exit(FAILURE);
+    }
+    if(pthread_mutex_init(&jc->shuffleMutex, nullptr) != 0)
     {
         std::cerr << SYS_ERROR << MUTEX_CREATE_FAIL << std::endl;
         exit(FAILURE);
@@ -328,7 +364,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
     initCounters(jc);
     initVectors(inputVec, outputVec, jc);
 
-    Barrier* barrier = new Barrier(multiThreadLevel);
+    auto* barrier = new Barrier(multiThreadLevel);
 
     // create threadContext for each thread
     for (int i = 0; i < multiThreadLevel; ++i) {
@@ -357,6 +393,7 @@ JobHandle startMapReduceJob(const MapReduceClient& client,
 void waitForJob(JobHandle job) {
     auto* jc = (jobContext*) job;
     if (!jc->wasInWaitForJob) {
+        jc->wasInWaitForJob = true;
         for (int i = 0; i < jc->MULTI_THREAD_NUM; ++i) {
             if (pthread_join(jc->threadContextsVec[i].threadId, nullptr) != 0)
             {
@@ -364,7 +401,7 @@ void waitForJob(JobHandle job) {
                 exit(FAILURE);
             }
         }
-        jc->wasInWaitForJob = true;
+
     }
 }
 
