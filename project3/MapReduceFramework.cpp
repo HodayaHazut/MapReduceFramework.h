@@ -243,13 +243,13 @@ void* jobManager(void* context)
     mapPhase(currThreadContext);
     sortPhase(currThreadContext);
 
-    currThreadContext->job->barrier->barrier();
+    currThreadContext->barrier->barrier();
 
     if (currThreadContext->job->threadContextsVec[0].threadId == currThreadContext->threadId)
     {
         shufflePhase(currThreadContext);
     }
-    currThreadContext->job->barrier->barrier();
+    currThreadContext->barrier->barrier();
     reducePhase(currThreadContext);
     return nullptr;
 }
