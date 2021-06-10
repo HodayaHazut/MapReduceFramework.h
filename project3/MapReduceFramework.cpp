@@ -188,6 +188,10 @@ void shufflePhase(ThreadContext *context) {
         {
             IntermediatePair pair = jc->threadContextsVec[i].mapOutputVector->back();
             auto key = pair.first;
+            auto it = jc->shuffleMap.find(key);
+            if (it == jc->shuffleMap.end()) {
+                jc->shuffleMap[key] = new std::vector<IntermediatePair>();
+            }
             jc->shuffleMap[key]->push_back(pair);
             jc->shuffleProgressCounter++;
             jc->threadContextsVec[i].mapOutputVector->pop_back();
